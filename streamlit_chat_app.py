@@ -1,0 +1,364 @@
+import streamlit as st
+from google import genai
+from google.genai import types
+import datetime
+import uuid
+import os
+import base64
+import time
+
+# --- Import Library RAG ---
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import Chroma
+
+# ── 1. Konfigurasi Halaman & UI ──────────────────────────────────────────────
+# Tambahkan initial_sidebar_state="expanded" agar otomatis terbuka
+# --- Logika Foto Profil Base64 dengan Sistem Pengaman ---
+foto_path = "Logo_Ai_Guard_Bot.png"
+if os.path.exists(foto_path):
+    st.set_page_config(page_title="Guardbot", page_icon=foto_path, layout="centered", initial_sidebar_state="expanded")
+    with open(foto_path, 'rb') as f:
+        foto_b64 = base64.b64encode(f.read()).decode()
+    foto_html = f'<img src="data:image/png;base64,{foto_b64}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">'
+    header_icon_css = "width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.2); border-radius: 50%;"
+    chat_icon_css = "width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border-radius: 50%;"
+else:
+    st.set_page_config(page_title="Guardbot", page_icon="🤖", layout="centered", initial_sidebar_state="expanded")
+    foto_html = "🤖"
+    header_icon_css = "font-size: 45px; background: #005b29; border-radius: 50%; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.2);"
+    chat_icon_css = "font-size: 30px; background: #005b29; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"
+
+st.markdown("""
+<style>
+    .stApp { background-color: #f4f7f8; }
+
+    /* HAPUS ATAU BERI KOMENTAR PADA BARIS DI BAWAH INI AGAR TOMBOL SIDEBAR MUNCUL */
+    /* header {visibility: hidden;} */
+
+    /* Styling tombol Quick Reply */
+    div.stButton > button {
+        background-color: #d1fcf0 !important;
+        color: #005b29 !important;
+        border: 1px solid #7ae0c2 !important;
+        border-radius: 20px !important;
+        padding: 5px 15px !important;
+        font-size: 13px !important;
+    }
+    div.stButton > button:hover {
+        background-color: #005b29 !important;
+        color: white !important;
+    }
+
+    /* Styling tombol History di Sidebar */
+    [data-testid="stSidebar"] {
+        background-color: #1e1f20 !important;
+    }
+    [data-testid="stSidebar"] * {
+        color: white !important;
+    }
+    [data-testid="stSidebar"] div.stButton > button {
+        background-color: transparent !important;
+        color: #e3e3e3 !important;
+        border: none !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+        padding-left: 10px !important;
+        border-radius: 8px !important;
+        font-size: 14px !important;
+    }
+    [data-testid="stSidebar"] div.stButton > button:hover {
+        background-color: #333537 !important;
+    }
+
+    .stChatInputContainer {
+        background-color: #d1fcf0 !important;
+        border-radius: 25px !important;
+        padding: 5px 10px !important;
+        border: none !important;
+    }
+    /* --- Animasi Spinner ala Gemini --- */
+    .gemini-spinner-container {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        margin-left: 10px;
+        margin-bottom: 20px;
+    }
+    .gemini-spinner {
+        width: 30px;
+        height: 30px;
+        border: 3px solid transparent;
+        border-top-color: #ffba08; /* Kuning */
+        border-right-color: #dc2f02; /* Oranye/Merah */
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        position: relative;
+    }
+    .gemini-spinner::after {
+        content: "✦";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 16px;
+        color: #4285f4; /* Bintang Biru */
+        animation: pulse 1s ease-in-out infinite;
+    }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        50% { opacity: 0.5; transform: translate(-50%, -50%) scale(0.8); }
+    }
+
+    /* Animasi kursor berkedip saat mengetik */
+    @keyframes blink { 50% { opacity: 0; } }
+    .typing-text { color: #888; font-size: 13px; font-style: italic; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div style="background-color: #d1fcf0; padding: 15px 20px; border-radius: 0px 0px 25px 25px; display: flex; align-items: center; gap: 15px; margin-top: -60px; margin-bottom: 25px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
+    <div style="{header_icon_css}">{foto_html}</div>
+    <div style="line-height: 1.2;">
+        <div style="font-size: 24px; font-weight: bold; color: #004d26;">Guardbot</div>
+        <div style="font-size: 13px; color: #00a859; font-weight: 600;">🟢 Asisten AI Muscle Guard</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+guardbot_instruction = """
+Kamu adalah Guardbot, asisten AI cerdas yang ahli di bidang kesehatan, kebugaran, dan gaya hidup secara umum, sekaligus representasi resmi untuk proyek Muscle Guard.
+Aturan Utama:
+1. 'Muscle Guard' adalah perangkat keras wearable berbentuk strap elastis dengan sensor MyoWare (sEMG) dan ESP32.
+2. 'MyoGuard' adalah aplikasi mobile pendamping.
+3. Jawab dengan paragraf yang rapi, ringkas, profesional, dan berbahasa Indonesia.
+4. Wawasan Kesehatan Umum: Kamu bebas dan sangat mampu menjawab pertanyaan apa pun terkait kesehatan tubuh, nutrisi, diet, pencegahan penyakit, hingga kebugaran mental dan fisik layaknya seorang pakar kesehatan.
+5. Spesialisasi Muscle Guard: Walaupun kamu tahu segala hal tentang kesehatan, jika pengguna bertanya spesifik tentang otot, olahraga berat, atau risiko cedera fisik, kamu WAJIB mengaitkannya dan mempromosikan teknologi 'Muscle Guard'.
+6. Batasan Medis (PENTING): Jika pengguna mengeluhkan sakit yang parah, berikan saran pertolongan pertama yang umum, namun selalu akhiri dengan peringatan ramah bahwa kamu adalah AI dan mereka harus berkonsultasi dengan dokter untuk diagnosis medis.
+7. Karakter: Jawablah dengan gaya yang empatik, wawasan yang luas, profesional, tidak kaku, dan menggunakan bahasa Indonesia yang natural.
+8. FORMAT DAFTAR: Jika kamu membuat daftar (list) poin-poin, kamu WAJIB menggunakan tanda hubung (-) atau angka (1, 2, 3). DILARANG KERAS menggunakan simbol bullet point bulat (●) atau simbol aneh lainnya.
+"""
+
+# ── 2. Sidebar & API Key ─────────────────────────────────────────────────────
+with st.sidebar:
+    st.subheader("Pengaturan")
+    google_api_key = st.text_input("Google AI API Key", type="password")
+
+# ── 3. Setup Database RAG (Dieksekusi sekali saja berkat @st.cache_resource) ─
+@st.cache_resource
+def setup_rag_database(api_key):
+    # Ganti dengan nama file PDF yang kamu punya di Colab
+    pdf_path = "referensi_guardbot.pdf"
+
+    # Cek apakah file PDF ada. Jika tidak, kembalikan None (Fallback)
+    if not os.path.exists(pdf_path):
+        return None
+
+    try:
+        # Load PDF
+        loader = PyPDFLoader(pdf_path)
+        pages = loader.load_and_split()
+
+        # Potong teks menjadi bagian kecil (Chunking)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+        chunks = text_splitter.split_documents(pages)
+
+        # Buat Embedding
+        embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2", google_api_key=api_key)
+
+        # Simpan ke ChromaDB (In-Memory untuk kecepatan di Streamlit)
+        vector_db = Chroma.from_documents(chunks, embeddings)
+
+        # Kembalikan objek pencarinya (Retriever) mengambil 3 dokumen paling relevan
+        return vector_db.as_retriever(search_kwargs={"k": 3})
+    except Exception as e:
+        print(f"Error setup RAG: {e}")
+        return None
+
+# ── 4. Fungsi Pembuat Sesi Baru ──────────────────────────────────────────────
+def create_new_session():
+    session_id = str(uuid.uuid4())
+    chat_config = types.GenerateContentConfig(
+        system_instruction=guardbot_instruction,
+        temperature=0.3,
+    )
+    gemini_chat = st.session_state.genai_client.chats.create(
+        model="gemini-2.5-flash", config=chat_config
+    )
+    st.session_state.chat_sessions[session_id] = {
+        "title": "Percakapan Baru",
+        "messages": [
+            {"role": "assistant", "content": "Halo Ashpirant,\nSaya Guardbot, asisten AI Muscle Guard. Ada yang bisa saya bantu?", "time": datetime.datetime.now().strftime("%H.%M")}
+        ],
+        "gemini_chat": gemini_chat
+    }
+    st.session_state.current_session_id = session_id
+
+# ── 5. Inisialisasi Client & Manajemen History ───────────────────────────────
+if google_api_key:
+    if ("genai_client" not in st.session_state) or (getattr(st.session_state, "_last_key", None) != google_api_key):
+        try:
+            st.session_state.genai_client = genai.Client(api_key=google_api_key)
+            st.session_state._last_key = google_api_key
+            st.session_state.chat_sessions = {}
+            st.session_state.current_session_id = None
+            create_new_session()
+        except Exception as e:
+            st.error(f"API Key tidak valid: {e}")
+            st.stop()
+
+    # Inisialisasi Database RAG jika API Key sudah ada
+    # Hasilnya disimpan di st.session_state agar bisa diakses di bawah
+    st.session_state.rag_retriever = setup_rag_database(google_api_key)
+
+if not google_api_key:
+    st.info("Masukkan API Key di sidebar untuk mulai.", icon="🗝️")
+    st.stop()
+
+# ── 6. Render Sidebar History ─────────────────────────────────────
+with st.sidebar:
+    st.divider()
+    if st.button("➕ Percakapan Baru", use_container_width=True):
+        create_new_session()
+        st.rerun()
+
+    st.caption("Riwayat Chat")
+    for sid, session_data in reversed(list(st.session_state.chat_sessions.items())):
+        if st.button(f"💬 {session_data['title']}", key=sid, use_container_width=True):
+            st.session_state.current_session_id = sid
+            st.rerun()
+
+current_id = st.session_state.current_session_id
+active_session = st.session_state.chat_sessions[current_id]
+
+# ── 7. Render UI Percakapan Aktif & Quick Replies ────────────────────────────
+quick_prompt = None
+
+for i, msg in enumerate(active_session["messages"]):
+    if msg["role"] == "assistant":
+        html = f"""
+        <div style="display: flex; gap: 12px; margin-bottom: 2px; align-items: flex-start;">
+            <div style="{chat_icon_css}">{foto_html}</div>
+            <div style="background-color: white; padding: 15px; border-radius: 0px 15px 15px 15px; max-width: 75%; box-shadow: 0 2px 5px rgba(0,0,0,0.05); font-size: 14.5px; color: #333; line-height: 1.5;">
+                {msg['content'].replace(chr(10), '<br>')}
+            </div>
+        </div>
+        <div style="font-size: 11px; color: #a0a0a0; margin-left: 60px; margin-bottom: 15px;">{msg['time']}</div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
+
+        # ── 8. Quick Replies ───────────────────────────────
+        if i == 0:
+            st.markdown("<div style='font-size: 13px; color: #555; margin-bottom: 5px; margin-left: 60px;'>Pertanyaan Umum</div>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col1:
+                if st.button("Apa itu Muskuloskeletal?", key=f"q1_{current_id}", use_container_width=True): quick_prompt = "Apa itu Muskuloskeletal?"
+            with col2:
+                if st.button("Apa itu MuscleGuard?", key=f"q2_{current_id}", use_container_width=True): quick_prompt = "Jelaskan tentang Muscle Guard!"
+            with col3: pass
+
+            col4, col5, col6 = st.columns([1, 1, 1])
+            with col4:
+                if st.button("Panduan kerja alat", key=f"q3_{current_id}", use_container_width=True): quick_prompt = "Bagaimana panduan kerjanya?"
+            with col5:
+                if st.button("Tips Cedera", key=f"q4_{current_id}", use_container_width=True): quick_prompt = "Berikan tips mencegah cedera."
+            with col6: pass
+            st.markdown("<br>", unsafe_allow_html=True)
+
+    else:
+        html = f"""
+        <div style="display: flex; justify-content: flex-end; margin-bottom: 2px;">
+            <div style="background-color: #005b29; color: white; padding: 15px; border-radius: 15px 0px 15px 15px; max-width: 75%; font-size: 14.5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); line-height: 1.5;">
+                {msg['content']}
+            </div>
+        </div>
+        <div style="font-size: 11px; color: #a0a0a0; text-align: right; margin-right: 5px; margin-bottom: 15px;">{msg['time']}</div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
+
+# ── 9. Logika Chat & Proses RAG ──────────────────────────────────────────────
+user_input = st.chat_input("Tanya Guardbot...")
+prompt = quick_prompt or user_input
+
+if prompt:
+    current_time = datetime.datetime.now().strftime("%H.%M")
+    if active_session["title"] == "Percakapan Baru":
+        active_session["title"] = prompt[:25] + "..." if len(prompt) > 25 else prompt
+    active_session["messages"].append({"role": "user", "content": prompt, "time": current_time})
+    st.rerun()
+
+# Proses balasan AI
+if len(active_session["messages"]) > 1 and active_session["messages"][-1]["role"] == "user":
+    last_user_prompt = active_session["messages"][-1]["content"]
+
+    loading_placeholder = st.empty()
+    chat_placeholder = st.empty()
+    full_response = ""
+    answer = "" 
+    alur_berpikir = "Menganalisis pertanyaan..."
+
+    loading_placeholder.markdown("""
+    <div class="gemini-spinner-container">
+        <div class="gemini-spinner"></div>
+        <div class="typing-text">Guardbot sedang berpikir...</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    try:
+        retriever = st.session_state.get("rag_retriever")
+        
+        if retriever is not None:
+            docs = retriever.invoke(last_user_prompt)
+            if len(docs) > 0:
+                konteks_pdf = "\n\n".join(doc.page_content for doc in docs)
+                konteks_pdf = konteks_pdf.encode('ascii', 'ignore').decode('ascii')
+                alur_berpikir = f"Mencari di database internal Muscle Guard...<br>✓ Menemukan {len(docs)} dokumen relevan."
+                augmented_prompt = f"Dokumen: {konteks_pdf}\n\nPertanyaan: {last_user_prompt}"
+                try:
+                    response_stream = active_session["gemini_chat"].send_message_stream(augmented_prompt)
+                except Exception as e:
+                    if "429" in str(e):
+                        loading_placeholder.markdown('<div class="typing-text">Limit tercapai, mencoba lagi dalam 5 detik...</div>', unsafe_allow_html=True)
+                        time.sleep(5)
+                        response_stream = active_session["gemini_chat"].send_message_stream(augmented_prompt)
+                    else: raise e
+            else:
+                alur_berpikir = "Informasi tidak ditemukan di PDF. Menggunakan pengetahuan umum."
+                response_stream = active_session["gemini_chat"].send_message_stream(last_user_prompt)
+        else:
+            response_stream = active_session["gemini_chat"].send_message_stream(last_user_prompt)
+
+        is_first_chunk = True
+        for chunk in response_stream:
+            if is_first_chunk:
+                loading_placeholder.empty()
+                is_first_chunk = False
+
+            if chunk.text:
+                teks_bersih = chunk.text.replace('\u25cf', '-').replace('\u2022', '-')
+                full_response += teks_bersih
+
+                dropdown_html = f"""<details style="margin-bottom: 12px; cursor: pointer;"><summary style="font-size: 12px; color: #005b29; font-weight: 600;">🧠 Tampilkan alur berpikir</summary><div style="font-size: 11.5px; color: #555; background-color: #f4f7f8; padding: 10px; border-radius: 8px; margin-top: 8px; border-left: 3px solid #005b29;">{alur_berpikir}</div></details>"""
+
+                chat_placeholder.markdown(f"""
+<div style="display: flex; gap: 12px; margin-bottom: 2px; align-items: flex-start;">
+<div style="{chat_icon_css}">{foto_html}</div>
+<div style="background-color: white; padding: 15px; border-radius: 0px 15px 15px 15px; max-width: 75%; box-shadow: 0 2px 5px rgba(0,0,0,0.05); font-size: 14.5px; color: #333; line-height: 1.5;">
+{dropdown_html}
+{full_response.replace(chr(10), '<br>')} <span style="animation: blink 1s step-end infinite; color: #005b29;">▌</span>
+</div>
+</div>
+""", unsafe_allow_html=True)
+
+        answer = full_response
+
+    except Exception as e:
+        loading_placeholder.empty()
+        answer = f"Maaf, terjadi kendala: {e}"
+        alur_berpikir = "Kegagalan sistem."
+
+    ai_time = datetime.datetime.now().strftime("%H.%M")
+    active_session["messages"].append({"role": "assistant", "content": answer, "time": ai_time, "thought": alur_berpikir})
+    st.rerun()
